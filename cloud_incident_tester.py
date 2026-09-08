@@ -18,6 +18,7 @@ AI-powered incident response agents.
 import os
 import logging
 import time
+import multiprocessing as mp
 
 import random
 import json
@@ -98,6 +99,12 @@ def generate_error_log():
         return jsonify({"error": "Intentional error logged", "code": 500, "type": "ZeroDivisionError"}), 500
     return jsonify({"message": "No error this time"}), 200
 
+def _cpu_burn_worker():
+    """Busy-loop that keeps one CPU core saturated (runs in its own process)."""
+    while True:
+        _ = sum(x * x for x in range(10000))
+
+
 @app.route('/api/error/resource')
 def resource_spike():
     """Simulate a resource usage spike (CPU‑intensive work) for SPIKE_DURATION seconds."""
@@ -105,12 +112,20 @@ def resource_spike():
         return jsonify({"message": "Resource spikes disabled via ENABLE_RESOURCE_SPIKES=false"}), 200
     logger.warning(f"Starting resource spike simulation for {SPIKE_DURATION} seconds")
     start_time = time.time()
-    # Busy‑wait loop – you can replace the inner work with anything that keeps the CPU busy.
-    # Here we do a tiny bit of work each iteration so the loop isn’t a pure sleep,
-    # but the dominant factor is the elapsed time.
-    while time.time() - start_time < SPIKE_DURATION:
-        # Light computation to keep the core occupied; adjust the range if you need more/less load.
-        _ = sum(x * x for x in range(500))   # ~0.1 ms per iteration – mainly we just wait
+    # Spawn one busy-loop process per CPU core so the instance is genuinely
+    # saturated (multiprocessing bypasses the Python GIL, unlike threads).
+    n_procs = max(1, mp.cpu_count())
+    workers = [mp.Process(target=_cpu_burn_worker, daemon=True) for _ in range(n_procs)]
+    for w in workers:
+        w.start()
+    try:
+        while time.time() - start_time < SPIKE_DURATION:
+            time.sleep(1)
+    finally:
+        for w in workers:
+            w.terminate()
+        for w in workers:
+            w.join(timeout=5)
     elapsed = time.time() - start_time
     logger.warning(f"Resource spike simulation completed after {elapsed:.2f} seconds")
     return jsonify({
